@@ -1,0 +1,117 @@
+<script defer src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"></script>
+
+<script>
+/** CONFIG **/
+const TENANT_ID = "TON_TENANT_ID";           // ex: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+const CLIENT_ID = "TON_CLIENT_ID";           // App registration (Application (client) ID)
+const WORKBOOK_PATH = "Documents/CFA_Notation/CFA_Notation.xlsx"; // chemin OneDrive
+const TBL_APPRENTIS = "tblApprentis";
+const TBL_NOTES = "tblNotes";
+
+const SCOPES = ["User.Read", "Files.ReadWrite"];
+
+function encodePath(p){
+  // encode chaque segment (gère espaces, accents…)
+  return p.split("/").map(s => encodeURIComponent(s)).join("/");
+}
+
+const msalConfig = {
+  auth: {
+    clientId: CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${TENANT_ID}`,
+    redirectUri: window.location.origin + window.location.pathname
+  },
+  cache: { cacheLocation: "localStorage" }
+};
+
+let msalInstance;
+
+async function initAuth(){
+  msalInstance = new msal.PublicClientApplication(msalConfig);
+  await msalInstance.initialize();
+  const resp = await msalInstance.handleRedirectPromise();
+  if (resp?.account) msalInstance.setActiveAccount(resp.account);
+
+  const accounts = msalInstance.getAllAccounts();
+  if (!msalInstance.getActiveAccount() && accounts.length) {
+    msalInstance.setActiveAccount(accounts[0]);
+  }
+}
+
+function isLoggedIn(){
+  return !!msalInstance?.getActiveAccount();
+}
+
+async function login(){
+  // Sur mobile, redirect est souvent plus fiable que popup
+  return msalInstance.loginRedirect({ scopes: SCOPES });
+}
+
+async function getToken(){
+  const account = msalInstance.getActiveAccount();
+  if (!account) throw new Error("Pas connecté");
+  try {
+    const r = await msalInstance.acquireTokenSilent({ account, scopes: SCOPES });
+    return r.accessToken;
+  } catch {
+    // fallback interactif
+    const r = await msalInstance.acquireTokenRedirect({ scopes: SCOPES });
+    return r.accessToken;
+  }
+}
+
+async function graphFetch(url, options={}){
+  const token = await getToken();
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...(options.headers||{})
+    }
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(()=> "");
+    throw new Error(`Graph ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
+
+function excelBase(){
+  // Path-based addressing OneDrive -> workbook
+  // /me/drive/root:/<path>:/workbook
+  return `https://graph.microsoft.com/v1.0/me/drive/root:/${encodePath(WORKBOOK_PATH)}:/workbook`;
+}
+
+async function loadApprentis(){
+  const url = `${excelBase()}/tables('${TBL_APPRENTIS}')/rows?$top=999`;
+  const data = await graphFetch(url);
+  // data.value = [{ values: [[...]] }, ...]
+  return (data.value || []).map(r => (r.values && r.values[0]) ? r.values[0] : []);
+}
+
+async function addNotes(rowsValues){
+  // rowsValues: tableau de lignes, ex [[timestamp, date, atelier, apprenti_id, note, ...], ...]
+  const url = `${excelBase()}/tables('${TBL_NOTES}')/rows/add`;
+  return graphFetch(url, {
+    method: "POST",
+    body: JSON.stringify({ values: rowsValues })
+  });
+}
+
+/** Exemple d’usage (à adapter à ton UI) **/
+(async () => {
+  await initAuth();
+
+  // Exemple : boutons à prévoir dans ton HTML
+  // document.getElementById("btnLogin").onclick = login;
+  // document.getElementById("btnSync").onclick = async () => { ... };
+
+  if (isLoggedIn()) {
+    const appr = await loadApprentis();
+    console.log("Apprentis:", appr);
+  } else {
+    console.log("Pas connecté. Appelle login().");
+  }
+})();
+</script>
